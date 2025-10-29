@@ -9,6 +9,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from extract_duration import (
     DurationExtractionError,
     extract_durations,
+    main,
     process_csv,
 )
 
@@ -60,3 +61,20 @@ def test_extract_durations_raises_for_missing_header(tmp_path: Path):
 
     with pytest.raises(DurationExtractionError):
         list(stream)
+
+
+def test_main_defaults_output_path_when_missing(tmp_path: Path, capsys):
+    input_path = tmp_path / "input.csv"
+    write_csv(input_path, ["1s"])
+
+    exit_code = main([str(input_path)])
+
+    assert exit_code == 0
+
+    expected_output = tmp_path / "durations_input.csv"
+    with expected_output.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.reader(handle)
+        assert list(reader) == [["1000"]]
+
+    captured = capsys.readouterr()
+    assert f"Successfully processed '{input_path}' into '{expected_output}'." in captured.out
