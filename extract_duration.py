@@ -120,6 +120,9 @@ class DurationStream(Iterable[str]):
                 if normalized_lower.endswith("ms"):
                     magnitude_text = normalized[:-2].strip()
                     multiplier = 1.0
+                elif normalized_lower.endswith(("μs", "µs", "us")):
+                    magnitude_text = normalized[:-2].strip()
+                    multiplier = 0.001
                 elif normalized_lower.endswith("s"):
                     magnitude_text = normalized[:-1].strip()
                     multiplier = 1000.0
