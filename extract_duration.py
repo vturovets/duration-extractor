@@ -1,7 +1,10 @@
 """CLI utility for extracting duration data from CSV files.
 
 Usage:
-    python extract_duration.py input.csv output.csv
+    python extract_duration.py input.csv [output.csv]
+
+If ``output.csv`` is omitted, the tool will create a file alongside ``input.csv``
+with the same name prefixed by ``durations_``.
 """
 
 from __future__ import annotations
@@ -65,8 +68,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "output_csv",
+        nargs="?",
         type=_output_path,
-        help="Path to the output CSV file that will receive the results.",
+        help=(
+            "Path to the output CSV file that will receive the results."
+            " Defaults to the input file name prefixed with 'durations_'."
+        ),
     )
     parser.add_argument(
         "--encoding",
@@ -189,10 +196,18 @@ def process_csv(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Entry point for the duration extraction CLI."""
+    output_path: Optional[Path] = None
     try:
         args = parse_args(argv)
         logging.basicConfig(level=logging.INFO, stream=sys.stderr)
-        process_csv(args.input_csv, args.output_csv, args.encoding)
+
+        output_path = args.output_csv
+        if output_path is None:
+            output_path = args.input_csv.with_name(
+                f"durations_{args.input_csv.name}"
+            )
+
+        process_csv(args.input_csv, output_path, args.encoding)
     except argparse.ArgumentTypeError as exc:
         print(exc, file=sys.stderr)
         return 2
@@ -200,7 +215,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"Failed to process CSV files: {exc}", file=sys.stderr)
         return 1
 
-    print(f"Successfully processed '{args.input_csv}' into '{args.output_csv}'.")
+    print(f"Successfully processed '{args.input_csv}' into '{output_path}'.")
     return 0
 
 
