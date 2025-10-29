@@ -25,14 +25,14 @@ def test_extract_durations_converts_units_and_tracks_counts(tmp_path: Path):
     input_path = tmp_path / "input.csv"
     write_csv(
         input_path,
-        ["100ms", "5s", "", "invalid"],
+        ["100ms", "5s", "1721.39μs", "", "invalid"],
     )
 
     stream = extract_durations(input_path)
     values = list(stream)
 
-    assert values == ["100", "5000"]
-    assert stream.processed_count == 2
+    assert values == ["100", "5000", "1.72139"]
+    assert stream.processed_count == 3
     assert stream.skipped_count == 1
     assert stream.malformed_count == 1
 
@@ -51,6 +51,19 @@ def test_process_csv_writes_normalized_values(tmp_path: Path):
     assert stats.processed == 2
     assert stats.skipped == 0
     assert stats.malformed == 0
+
+
+def test_extract_durations_supports_microseconds(tmp_path: Path):
+    input_path = tmp_path / "input.csv"
+    write_csv(input_path, ["1µs", "2μs", "3us"])
+
+    stream = extract_durations(input_path)
+    values = list(stream)
+
+    assert values == ["0.001", "0.002", "0.003"]
+    assert stream.processed_count == 3
+    assert stream.skipped_count == 0
+    assert stream.malformed_count == 0
 
 
 def test_extract_durations_raises_for_missing_header(tmp_path: Path):
