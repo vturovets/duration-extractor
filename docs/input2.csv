@@ -1,0 +1,8 @@
+Date,Service,Resource,Duration,Method,Status Code
+2025-11-27T15:23:23.859Z,/service,GET /resource,18.94ms,GET,200
+2025-11-27T15:23:21.722Z,/service,GET /resource,5.04s,GET,200
+2025-11-27T15:23:21.095Z,/service,GET /resource,304.44ms,GET,200
+2025-11-27T15:23:21.089Z,/service,GET /resource,1140.51ms,GET,200
+2025-11-27T15:23:20.680Z,/service,GET /resource,1.43s,GET,200
+2025-11-27T15:23:20.675Z,/service,GET /resource,82.72ms,GET,200
+2025-11-27T15:23:20.671Z,/service,GET /resource,111.29ms,GET,200
