@@ -387,7 +387,7 @@ def summarize_csv(input_path: Path, *, encoding: str) -> BatchSummaryRow:
     )
 
 
-SUMMARY_COLUMNS = ["Date", "n", "P95", "Time of Day", "Intensity"]
+SUMMARY_COLUMNS = ["Filename", "Date", "n", "P95", "Time of Day", "Intensity"]
 FLOAT_FORMAT = ".2f"
 
 
@@ -411,6 +411,7 @@ def _write_summary(
         for record in records:
             writer.writerow(
                 [
+                    str(record.get("filename", "")),
                     str(record.get("date", "")),
                     str(record.get("observations", 0)),
                     _format_optional_float(record.get("percentile_95")),

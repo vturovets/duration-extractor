@@ -142,9 +142,23 @@ def test_main_processes_directory_and_writes_summary(tmp_path: Path, capsys):
         reader = csv.reader(handle)
         rows = list(reader)
 
-    assert rows[0] == ["Date", "n", "P95", "Time of Day", "Intensity"]
-    assert rows[1] == ["2025-10-27", "3", "3000.00", "Morning", "1.50"]
-    assert rows[2] == ["2025-10-28", "3", "1000.00", "Afternoon", "0.30"]
+    assert rows[0] == ["Filename", "Date", "n", "P95", "Time of Day", "Intensity"]
+    assert rows[1] == [
+        "alpha.csv",
+        "2025-10-27",
+        "3",
+        "3000.00",
+        "Morning",
+        "1.50",
+    ]
+    assert rows[2] == [
+        "beta.csv",
+        "2025-10-28",
+        "3",
+        "1000.00",
+        "Afternoon",
+        "0.30",
+    ]
 
     output_a = batch_dir / "durations_alpha.csv"
     with output_a.open("r", newline="", encoding="utf-8") as handle:
@@ -229,7 +243,14 @@ def test_process_directory_returns_ordered_records(tmp_path: Path):
         reader = csv.reader(handle)
         rows = list(reader)
 
-    assert rows[1] == ["2025-10-27", "3", "3000.00", "Morning", "1.50"]
+    assert rows[1] == [
+        "alpha.csv",
+        "2025-10-27",
+        "3",
+        "3000.00",
+        "Morning",
+        "1.50",
+    ]
 
 
 def test_process_directory_writes_summary_for_multiple_files(tmp_path: Path):
@@ -298,10 +319,10 @@ def test_process_directory_writes_summary_for_multiple_files(tmp_path: Path):
         rows = list(reader)
 
     assert rows == [
-        ["Date", "n", "P95", "Time of Day", "Intensity"],
-        ["2025-01-01", "2", "400.00", "Morning", "0.20"],
-        ["2025-01-02", "2", "3000.00", "Afternoon", "0.10"],
-        ["2025-01-03", "3", "1250.00", "Evening", "0.01"],
+        ["Filename", "Date", "n", "P95", "Time of Day", "Intensity"],
+        ["alpha.csv", "2025-01-01", "2", "400.00", "Morning", "0.20"],
+        ["beta.csv", "2025-01-02", "2", "3000.00", "Afternoon", "0.10"],
+        ["gamma.csv", "2025-01-03", "3", "1250.00", "Evening", "0.01"],
     ]
 
 
@@ -387,7 +408,7 @@ def test_main_writes_custom_summary_output(tmp_path: Path, capsys):
         reader = csv.reader(handle)
         rows = list(reader)
 
-    assert rows[0] == ["Date", "n", "P95", "Time of Day", "Intensity"]
+    assert rows[0] == ["Filename", "Date", "n", "P95", "Time of Day", "Intensity"]
     assert len(rows) == 3
 
     captured = capsys.readouterr()
