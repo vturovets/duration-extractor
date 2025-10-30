@@ -12,10 +12,12 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
-from typing import Iterable, Iterator, Optional, Sequence
+from typing import Iterable, Iterator, List, Optional, Sequence
 
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,43 @@ class DurationExtractionStats:
     processed: int
     skipped: int
     malformed: int
+
+
+@dataclass(frozen=True)
+class BatchSummaryRow:
+    """Summary information computed for a single CSV file in batch mode."""
+
+    date: str
+    observations: int
+    percentile_95: Optional[float]
+    time_of_day: str
+    intensity: Optional[float]
+
+
+def _normalize_duration_to_milliseconds(raw_value: str) -> float:
+    """Return ``raw_value`` expressed in milliseconds."""
+
+    normalized = raw_value.strip()
+    normalized_lower = normalized.lower()
+
+    if normalized_lower.endswith("ms"):
+        magnitude_text = normalized[:-2].strip()
+        multiplier = 1.0
+    elif normalized_lower.endswith(("μs", "µs", "us")):
+        magnitude_text = normalized[:-2].strip()
+        multiplier = 0.001
+    elif normalized_lower.endswith("s"):
+        magnitude_text = normalized[:-1].strip()
+        multiplier = 1000.0
+    else:
+        raise ValueError("missing units")
+
+    try:
+        magnitude = float(magnitude_text)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+
+    return magnitude * multiplier
 
 
 def _readable_file(path_str: str) -> Path:
@@ -56,6 +95,18 @@ def _output_path(path_str: str) -> Path:
     return Path(path_str)
 
 
+def _readable_directory(path_str: str) -> Path:
+    """Return a Path for ``path_str`` if it is an existing directory."""
+    path = Path(path_str)
+    if not path.exists():
+        raise argparse.ArgumentTypeError(f"Batch directory '{path}' does not exist.")
+    if not path.is_dir():
+        raise argparse.ArgumentTypeError(
+            f"Batch directory '{path}' is not a directory."
+        )
+    return path
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
@@ -63,6 +114,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "input_csv",
+        nargs="?",
         type=_readable_file,
         help="Path to the input CSV file containing source data.",
     )
@@ -76,11 +128,39 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--batch-dir",
+        type=_readable_directory,
+        help="Process every CSV file within the specified directory.",
+    )
+    parser.add_argument(
+        "--summary-output",
+        type=_output_path,
+        help=(
+            "Path to the summary CSV generated in batch mode (default: 'summary.csv'"
+            " inside the batch directory)."
+        ),
+    )
+    parser.add_argument(
         "--encoding",
         default="utf-8",
         help="Text encoding used for reading and writing CSV files (default: UTF-8).",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+
+    if bool(args.input_csv) == bool(args.batch_dir):
+        raise argparse.ArgumentTypeError(
+            "Provide either an input CSV file or --batch-dir, but not both."
+        )
+
+    if args.batch_dir is None and args.summary_output is not None:
+        raise argparse.ArgumentTypeError(
+            "--summary-output can only be used together with --batch-dir."
+        )
+
+    if args.batch_dir is not None and args.summary_output is None:
+        args.summary_output = args.batch_dir / "summary.csv"
+
+    return args
 
 
 class DurationStream(Iterable[str]):
@@ -114,40 +194,26 @@ class DurationStream(Iterable[str]):
                     self.skipped_count += 1
                     continue
 
-                normalized = raw_value.strip()
-                normalized_lower = normalized.lower()
-
-                if normalized_lower.endswith("ms"):
-                    magnitude_text = normalized[:-2].strip()
-                    multiplier = 1.0
-                elif normalized_lower.endswith(("μs", "µs", "us")):
-                    magnitude_text = normalized[:-2].strip()
-                    multiplier = 0.001
-                elif normalized_lower.endswith("s"):
-                    magnitude_text = normalized[:-1].strip()
-                    multiplier = 1000.0
-                else:
-                    self.malformed_count += 1
-                    logger.warning(
-                        "Row %d has malformed Duration '%s': missing units; skipping.",
-                        row_number,
-                        raw_value,
-                    )
-                    continue
-
                 try:
-                    magnitude = float(magnitude_text)
+                    millis = _normalize_duration_to_milliseconds(raw_value)
                 except ValueError as exc:
                     self.malformed_count += 1
-                    logger.warning(
-                        "Row %d has malformed Duration '%s': %s; skipping.",
-                        row_number,
-                        raw_value,
-                        exc,
-                    )
+                    message = str(exc)
+                    if message == "missing units":
+                        logger.warning(
+                            "Row %d has malformed Duration '%s': missing units; skipping.",
+                            row_number,
+                            raw_value,
+                        )
+                    else:
+                        logger.warning(
+                            "Row %d has malformed Duration '%s': %s; skipping.",
+                            row_number,
+                            raw_value,
+                            message,
+                        )
                     continue
 
-                millis = magnitude * multiplier
                 self.processed_count += 1
                 yield format(millis, "g")
 
@@ -197,12 +263,169 @@ def process_csv(
     return stats
 
 
+def _parse_iso8601(value: str) -> Optional[datetime]:
+    """Parse ``value`` as an ISO-8601 datetime."""
+
+    text = value.strip()
+    if not text:
+        return None
+
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _time_of_day_label(timestamp: datetime) -> str:
+    """Return a human-readable time-of-day label for ``timestamp``."""
+
+    hour = timestamp.astimezone(timezone.utc).hour
+    if 5 <= hour < 12:
+        return "Morning"
+    if 12 <= hour < 18:
+        return "Afternoon"
+    return "Evening"
+
+
+def _calculate_percentile(values: Sequence[float], percentile: float) -> float:
+    """Return the ``percentile`` (0-1) from ``values`` using the nearest-rank method."""
+
+    if not 0 < percentile <= 1:
+        raise ValueError("percentile must be within (0, 1]")
+    if not values:
+        raise ValueError("values must be non-empty")
+
+    ordered = sorted(values)
+    index = max(0, math.ceil(percentile * len(ordered)) - 1)
+    return ordered[index]
+
+
+def _summarize_csv(input_path: Path, *, encoding: str) -> BatchSummaryRow:
+    """Compute summary statistics for ``input_path``."""
+
+    durations: List[float] = []
+    timestamps: List[datetime] = []
+
+    with input_path.open("r", newline="", encoding=encoding) as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            raise DurationExtractionError("Input CSV is missing a header row.")
+        if "Duration" not in reader.fieldnames:
+            raise DurationExtractionError(
+                "Input CSV does not contain a 'Duration' column."
+            )
+        if "Date" not in reader.fieldnames:
+            raise DurationExtractionError(
+                "Input CSV does not contain a 'Date' column required for summaries."
+            )
+
+        for row in reader:
+            raw_duration = row.get("Duration")
+            if raw_duration is None or raw_duration.strip() == "":
+                continue
+
+            try:
+                millis = _normalize_duration_to_milliseconds(raw_duration)
+            except ValueError:
+                continue
+
+            raw_timestamp = row.get("Date")
+            timestamp = _parse_iso8601(raw_timestamp or "") if raw_timestamp else None
+            if timestamp is None:
+                continue
+
+            durations.append(millis)
+            timestamps.append(timestamp)
+
+    observations = len(durations)
+    date_text = ""
+    time_of_day = ""
+    intensity: Optional[float] = None
+    percentile_95: Optional[float] = None
+
+    if observations:
+        percentile_95 = _calculate_percentile(durations, 0.95)
+
+    if timestamps:
+        earliest = min(timestamps)
+        latest = max(timestamps)
+        date_text = earliest.date().isoformat()
+        time_of_day = _time_of_day_label(earliest)
+        span_seconds = (latest - earliest).total_seconds()
+        if span_seconds > 0:
+            intensity = observations / span_seconds
+
+    return BatchSummaryRow(
+        date=date_text,
+        observations=observations,
+        percentile_95=percentile_95,
+        time_of_day=time_of_day,
+        intensity=intensity,
+    )
+
+
+def _write_summary(
+    output_path: Path, rows: Sequence[BatchSummaryRow], *, encoding: str
+) -> None:
+    """Persist ``rows`` to ``output_path`` as a CSV table."""
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding=encoding) as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["Date", "n", "P95", "Time of Day", "Intensity"])
+        for row in rows:
+            writer.writerow(
+                [
+                    row.date,
+                    str(row.observations),
+                    "" if row.percentile_95 is None else format(row.percentile_95, "g"),
+                    row.time_of_day,
+                    "" if row.intensity is None else format(row.intensity, "g"),
+                ]
+            )
+
+
+def process_directory(
+    directory: Path, *, summary_output: Path, encoding: str
+) -> Sequence[BatchSummaryRow]:
+    """Process every CSV file within ``directory`` and return summary information."""
+
+    csv_files = sorted(
+        path for path in directory.iterdir() if path.is_file() and path.suffix.lower() == ".csv"
+    )
+
+    summaries: List[BatchSummaryRow] = []
+
+    for input_path in csv_files:
+        output_path = input_path.with_name(f"durations_{input_path.name}")
+        process_csv(input_path, output_path, encoding)
+        summaries.append(_summarize_csv(input_path, encoding=encoding))
+
+    _write_summary(summary_output, summaries, encoding=encoding)
+    return summaries
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Entry point for the duration extraction CLI."""
-    output_path: Optional[Path] = None
     try:
         args = parse_args(argv)
         logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+
+        if args.batch_dir is not None:
+            summaries = process_directory(
+                args.batch_dir,
+                summary_output=args.summary_output,
+                encoding=args.encoding,
+            )
+            print(
+                f"Successfully processed directory '{args.batch_dir}' "
+                f"and wrote {len(summaries)} summary row(s) to "
+                f"'{args.summary_output}'."
+            )
+            return 0
 
         output_path = args.output_csv
         if output_path is None:
