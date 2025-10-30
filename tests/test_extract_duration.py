@@ -11,6 +11,7 @@ from extract_duration import (
     extract_durations,
     main,
     process_csv,
+    summarize_csv,
 )
 
 
@@ -27,6 +28,14 @@ def write_csv_with_dates(path: Path, rows):
         writer.writerow(["Date", "Duration"])
         for date_value, duration in rows:
             writer.writerow([date_value, duration])
+
+
+def write_csv_with_mixed_columns(path: Path, rows):
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["Date", "Duration", "Other"])
+        for date_value, duration, other in rows:
+            writer.writerow([date_value, duration, other])
 
 
 def test_extract_durations_converts_units_and_tracks_counts(tmp_path: Path):
@@ -148,3 +157,26 @@ def test_main_processes_directory_and_writes_summary(tmp_path: Path, capsys):
 
     captured = capsys.readouterr()
     assert "summary row(s)" in captured.out
+
+
+def test_summarize_csv_aggregates_by_dominant_date_and_time(tmp_path: Path):
+    input_path = tmp_path / "summary.csv"
+    write_csv_with_mixed_columns(
+        input_path,
+        [
+            ("2025-10-27T06:00:00Z", "100ms", "a"),
+            ("2025-10-27T07:30:00Z", "1s", "b"),
+            ("2025-10-27T18:00:00Z", "750ms", "c"),
+            ("2025-10-28T07:00:00Z", "200ms", "d"),
+            ("2025-10-27T08:00:00Z", "", "e"),
+        ],
+    )
+
+    summary = summarize_csv(input_path, encoding="utf-8")
+
+    assert summary.date == "2025-10-27"
+    assert summary.observations == 4
+    assert summary.percentile_95 == 1000.0
+    assert summary.time_of_day == "Morning"
+    assert summary.intensity is not None
+    assert summary.intensity == pytest.approx(summary.observations / 90000)

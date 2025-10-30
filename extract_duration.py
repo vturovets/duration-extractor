@@ -13,6 +13,7 @@ import argparse
 import csv
 import logging
 import math
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -303,11 +304,13 @@ def _calculate_percentile(values: Sequence[float], percentile: float) -> float:
     return ordered[index]
 
 
-def _summarize_csv(input_path: Path, *, encoding: str) -> BatchSummaryRow:
+def summarize_csv(input_path: Path, *, encoding: str) -> BatchSummaryRow:
     """Compute summary statistics for ``input_path``."""
 
     durations: List[float] = []
     timestamps: List[datetime] = []
+    date_counts: Counter[str] = Counter()
+    time_of_day_counts: Counter[str] = Counter()
 
     with input_path.open("r", newline="", encoding=encoding) as handle:
         reader = csv.DictReader(handle)
@@ -340,6 +343,12 @@ def _summarize_csv(input_path: Path, *, encoding: str) -> BatchSummaryRow:
             durations.append(millis)
             timestamps.append(timestamp)
 
+            date_key = timestamp.date().isoformat()
+            date_counts[date_key] += 1
+
+            label = _time_of_day_label(timestamp)
+            time_of_day_counts[label] += 1
+
     observations = len(durations)
     date_text = ""
     time_of_day = ""
@@ -352,11 +361,22 @@ def _summarize_csv(input_path: Path, *, encoding: str) -> BatchSummaryRow:
     if timestamps:
         earliest = min(timestamps)
         latest = max(timestamps)
-        date_text = earliest.date().isoformat()
-        time_of_day = _time_of_day_label(earliest)
         span_seconds = (latest - earliest).total_seconds()
         if span_seconds > 0:
             intensity = observations / span_seconds
+
+        if date_counts:
+            dominant_date, _ = max(
+                date_counts.items(), key=lambda item: (item[1], item[0])
+            )
+            date_text = dominant_date
+
+        if time_of_day_counts:
+            order = {"Morning": 0, "Afternoon": 1, "Evening": 2}
+            time_of_day = max(
+                time_of_day_counts.items(),
+                key=lambda item: (item[1], -order.get(item[0], 99)),
+            )[0]
 
     return BatchSummaryRow(
         date=date_text,
@@ -402,7 +422,7 @@ def process_directory(
     for input_path in csv_files:
         output_path = input_path.with_name(f"durations_{input_path.name}")
         process_csv(input_path, output_path, encoding)
-        summaries.append(_summarize_csv(input_path, encoding=encoding))
+        summaries.append(summarize_csv(input_path, encoding=encoding))
 
     _write_summary(summary_output, summaries, encoding=encoding)
     return summaries
