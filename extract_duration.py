@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
-from typing import Iterable, Iterator, List, Optional, Sequence
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence
 
 
 logger = logging.getLogger(__name__)
@@ -387,45 +387,67 @@ def summarize_csv(input_path: Path, *, encoding: str) -> BatchSummaryRow:
     )
 
 
+SUMMARY_COLUMNS = ["Date", "n", "P95", "Time of Day", "Intensity"]
+FLOAT_FORMAT = ".2f"
+
+
+def _format_optional_float(value: Optional[float]) -> str:
+    """Return ``value`` formatted with a consistent number of decimals."""
+
+    if value is None:
+        return ""
+    return format(value, FLOAT_FORMAT)
+
+
 def _write_summary(
-    output_path: Path, rows: Sequence[BatchSummaryRow], *, encoding: str
+    output_path: Path, records: Sequence[Dict[str, object]], *, encoding: str
 ) -> None:
-    """Persist ``rows`` to ``output_path`` as a CSV table."""
+    """Persist ``records`` to ``output_path`` as a CSV table."""
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", newline="", encoding=encoding) as handle:
         writer = csv.writer(handle)
-        writer.writerow(["Date", "n", "P95", "Time of Day", "Intensity"])
-        for row in rows:
+        writer.writerow(SUMMARY_COLUMNS)
+        for record in records:
             writer.writerow(
                 [
-                    row.date,
-                    str(row.observations),
-                    "" if row.percentile_95 is None else format(row.percentile_95, "g"),
-                    row.time_of_day,
-                    "" if row.intensity is None else format(row.intensity, "g"),
+                    str(record.get("date", "")),
+                    str(record.get("observations", 0)),
+                    _format_optional_float(record.get("percentile_95")),
+                    str(record.get("time_of_day", "")),
+                    _format_optional_float(record.get("intensity")),
                 ]
             )
 
 
 def process_directory(
     directory: Path, *, summary_output: Path, encoding: str
-) -> Sequence[BatchSummaryRow]:
+) -> Sequence[Dict[str, object]]:
     """Process every CSV file within ``directory`` and return summary information."""
 
     csv_files = sorted(
         path for path in directory.iterdir() if path.is_file() and path.suffix.lower() == ".csv"
     )
 
-    summaries: List[BatchSummaryRow] = []
+    records: List[Dict[str, object]] = []
 
     for input_path in csv_files:
         output_path = input_path.with_name(f"durations_{input_path.name}")
         process_csv(input_path, output_path, encoding)
-        summaries.append(summarize_csv(input_path, encoding=encoding))
+        summary = summarize_csv(input_path, encoding=encoding)
+        records.append(
+            {
+                "filename": input_path.name,
+                "date": summary.date,
+                "observations": summary.observations,
+                "percentile_95": summary.percentile_95,
+                "time_of_day": summary.time_of_day,
+                "intensity": summary.intensity,
+            }
+        )
 
-    _write_summary(summary_output, summaries, encoding=encoding)
-    return summaries
+    _write_summary(summary_output, records, encoding=encoding)
+    return records
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

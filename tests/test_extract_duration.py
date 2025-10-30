@@ -11,6 +11,7 @@ from extract_duration import (
     extract_durations,
     main,
     process_csv,
+    process_directory,
     summarize_csv,
 )
 
@@ -142,8 +143,8 @@ def test_main_processes_directory_and_writes_summary(tmp_path: Path, capsys):
         rows = list(reader)
 
     assert rows[0] == ["Date", "n", "P95", "Time of Day", "Intensity"]
-    assert rows[1] == ["2025-10-27", "3", "3000", "Morning", "1.5"]
-    assert rows[2] == ["2025-10-28", "3", "1000", "Afternoon", "0.3"]
+    assert rows[1] == ["2025-10-27", "3", "3000.00", "Morning", "1.50"]
+    assert rows[2] == ["2025-10-28", "3", "1000.00", "Afternoon", "0.30"]
 
     output_a = batch_dir / "durations_alpha.csv"
     with output_a.open("r", newline="", encoding="utf-8") as handle:
@@ -180,3 +181,52 @@ def test_summarize_csv_aggregates_by_dominant_date_and_time(tmp_path: Path):
     assert summary.time_of_day == "Morning"
     assert summary.intensity is not None
     assert summary.intensity == pytest.approx(summary.observations / 90000)
+
+
+def test_process_directory_returns_ordered_records(tmp_path: Path):
+    batch_dir = tmp_path
+    file_b = batch_dir / "beta.csv"
+    file_a = batch_dir / "alpha.csv"
+
+    write_csv_with_dates(
+        file_b,
+        [
+            ("2025-10-28T15:00:00Z", "500ms"),
+            ("2025-10-28T15:00:05Z", "250ms"),
+            ("2025-10-28T15:00:10Z", "1s"),
+        ],
+    )
+    write_csv_with_dates(
+        file_a,
+        [
+            ("2025-10-27T09:00:00Z", "100ms"),
+            ("2025-10-27T09:00:01Z", "200ms"),
+            ("2025-10-27T09:00:02Z", "3s"),
+        ],
+    )
+
+    summary_path = batch_dir / "summary.csv"
+    records = process_directory(
+        batch_dir, summary_output=summary_path, encoding="utf-8"
+    )
+
+    assert [record["filename"] for record in records] == ["alpha.csv", "beta.csv"]
+    alpha, beta = records
+
+    assert alpha["date"] == "2025-10-27"
+    assert alpha["observations"] == 3
+    assert alpha["percentile_95"] == pytest.approx(3000.0)
+    assert alpha["time_of_day"] == "Morning"
+    assert alpha["intensity"] == pytest.approx(1.5)
+
+    assert beta["date"] == "2025-10-28"
+    assert beta["observations"] == 3
+    assert beta["percentile_95"] == pytest.approx(1000.0)
+    assert beta["time_of_day"] == "Afternoon"
+    assert beta["intensity"] == pytest.approx(0.3)
+
+    with summary_path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.reader(handle)
+        rows = list(reader)
+
+    assert rows[1] == ["2025-10-27", "3", "3000.00", "Morning", "1.50"]
