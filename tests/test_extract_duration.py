@@ -7,7 +7,11 @@ import pytest
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from extract_duration import (
+    BatchConfigurationError,
+    BatchConfig,
     DurationExtractionError,
+    TimeOfDayPeriod,
+    load_batch_config,
     extract_durations,
     main,
     process_csv,
@@ -174,6 +178,95 @@ def test_main_processes_directory_and_writes_summary(tmp_path: Path, capsys):
     assert "summary row(s)" in captured.out
 
 
+def test_main_can_skip_per_file_outputs(tmp_path: Path, capsys):
+    batch_dir = tmp_path
+    file_a = batch_dir / "alpha.csv"
+    file_b = batch_dir / "beta.csv"
+
+    write_csv_with_dates(
+        file_a,
+        [
+            ("2025-10-27T09:00:00Z", "100ms"),
+            ("2025-10-27T09:00:01Z", "200ms"),
+        ],
+    )
+    write_csv_with_dates(
+        file_b,
+        [
+            ("2025-10-28T15:00:00Z", "500ms"),
+            ("2025-10-28T15:00:05Z", "250ms"),
+        ],
+    )
+
+    config_path = batch_dir / "config.txt"
+    config_path.write_text(
+        "[batch]\nwrite_per_file_durations = false\n", encoding="utf-8"
+    )
+
+    exit_code = main(["--batch-dir", str(batch_dir)])
+
+    assert exit_code == 0
+
+    summary_path = batch_dir / "summary.csv"
+    assert summary_path.exists()
+
+    output_a = batch_dir / "durations_alpha.csv"
+    output_b = batch_dir / "durations_beta.csv"
+
+    assert not output_a.exists()
+    assert not output_b.exists()
+
+    captured = capsys.readouterr()
+    assert "summary row(s)" in captured.out
+
+
+def test_load_batch_config_defaults_to_enabled(tmp_path: Path):
+    batch_dir = tmp_path
+    config = load_batch_config(batch_dir)
+
+    assert config.write_per_file_durations is True
+    assert [period.label for period in config.time_of_day_periods] == [
+        "Morning",
+        "Afternoon",
+        "Evening",
+    ]
+
+
+def test_load_batch_config_rejects_invalid_type(tmp_path: Path):
+    config_path = tmp_path / "config.txt"
+    config_path.write_text(
+        "[batch]\nwrite_per_file_durations = maybe\n", encoding="utf-8"
+    )
+
+    with pytest.raises(BatchConfigurationError):
+        load_batch_config(tmp_path)
+
+
+def test_load_batch_config_parses_time_of_day_periods(tmp_path: Path):
+    config_path = tmp_path / "config.txt"
+    config_path.write_text(
+        "[time_of_day]\nEarly = 0-12\nLate = 12-0\n", encoding="utf-8"
+    )
+
+    config = load_batch_config(tmp_path)
+
+    assert config.write_per_file_durations is True
+    assert [period.label for period in config.time_of_day_periods] == ["Early", "Late"]
+    assert [
+        (period.start_hour, period.end_hour) for period in config.time_of_day_periods
+    ] == [(0, 12), (12, 0)]
+
+
+def test_load_batch_config_rejects_invalid_time_of_day_periods(tmp_path: Path):
+    config_path = tmp_path / "config.txt"
+    config_path.write_text(
+        "[time_of_day]\nBad = 25-1\n", encoding="utf-8"
+    )
+
+    with pytest.raises(BatchConfigurationError):
+        load_batch_config(tmp_path)
+
+
 def test_summarize_csv_aggregates_by_dominant_date_and_time(tmp_path: Path):
     input_path = tmp_path / "summary.csv"
     write_csv_with_mixed_columns(
@@ -324,6 +417,43 @@ def test_process_directory_writes_summary_for_multiple_files(tmp_path: Path):
         ["beta.csv", "2025-01-02", "2", "3000.00", "Afternoon", "0.10"],
         ["gamma.csv", "2025-01-03", "3", "1250.00", "Evening", "0.01"],
     ]
+
+
+def test_process_directory_respects_time_of_day_config(tmp_path: Path):
+    batch_dir = tmp_path
+    file_path = batch_dir / "data.csv"
+
+    write_csv_with_dates(
+        file_path,
+        [
+            ("2025-01-01T02:00:00Z", "100ms"),
+            ("2025-01-01T14:00:00Z", "200ms"),
+        ],
+    )
+
+    summary_path = batch_dir / "summary.csv"
+    custom_config = BatchConfig(
+        time_of_day_periods=(
+            TimeOfDayPeriod(label="First", start_hour=0, end_hour=12),
+            TimeOfDayPeriod(label="Second", start_hour=12, end_hour=0),
+        )
+    )
+
+    records = process_directory(
+        batch_dir,
+        summary_output=summary_path,
+        encoding="utf-8",
+        batch_config=custom_config,
+    )
+
+    assert records[0]["time_of_day"] == "First"
+    assert records[0]["observations"] == 2
+
+    with summary_path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.reader(handle)
+        rows = list(reader)
+
+    assert rows[1][3] == "First"
 
 
 @pytest.mark.parametrize(

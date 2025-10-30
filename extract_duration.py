@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import configparser
 import logging
 import math
 from collections import Counter
@@ -26,6 +27,10 @@ logger = logging.getLogger(__name__)
 
 class DurationExtractionError(RuntimeError):
     """Raised when the input CSV cannot be parsed for duration extraction."""
+
+
+class BatchConfigurationError(DurationExtractionError):
+    """Raised when the batch processing configuration is invalid."""
 
 
 @dataclass(frozen=True)
@@ -46,6 +51,48 @@ class BatchSummaryRow:
     percentile_95: Optional[float]
     time_of_day: str
     intensity: Optional[float]
+
+
+@dataclass(frozen=True)
+class TimeOfDayPeriod:
+    """Represents a labeled window of hours used for time-of-day summaries."""
+
+    label: str
+    start_hour: int
+    end_hour: int
+
+    def contains(self, hour: int) -> bool:
+        """Return ``True`` when ``hour`` falls within this period."""
+
+        if not 0 <= hour < 24:
+            raise ValueError("hour must be within [0, 24)")
+
+        if self.start_hour == self.end_hour:
+            return False
+
+        if self.start_hour < self.end_hour:
+            return self.start_hour <= hour < self.end_hour
+
+        # Wrap-around period (e.g., 18 -> 5 covers evening into early morning)
+        return hour >= self.start_hour or hour < self.end_hour
+
+
+DEFAULT_TIME_OF_DAY_PERIODS = (
+    TimeOfDayPeriod(label="Morning", start_hour=5, end_hour=12),
+    TimeOfDayPeriod(label="Afternoon", start_hour=12, end_hour=18),
+    TimeOfDayPeriod(label="Evening", start_hour=18, end_hour=5),
+)
+
+
+@dataclass(frozen=True)
+class BatchConfig:
+    """Configuration options that control batch directory processing."""
+
+    write_per_file_durations: bool = True
+    time_of_day_periods: Sequence[TimeOfDayPeriod] = DEFAULT_TIME_OF_DAY_PERIODS
+
+
+DEFAULT_BATCH_CONFIG_NAME = "config.txt"
 
 
 def _normalize_duration_to_milliseconds(raw_value: str) -> float:
@@ -164,6 +211,114 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return args
 
 
+def _parse_bool(text: str, *, setting_name: str, config_path: Path) -> bool:
+    """Return ``text`` interpreted as a boolean value."""
+
+    normalized = text.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    raise BatchConfigurationError(
+        f"Setting '{setting_name}' in '{config_path}' must be a boolean value."
+    )
+
+
+def _parse_time_of_day_section(
+    parser: configparser.ConfigParser, *, config_path: Path
+) -> Sequence[TimeOfDayPeriod]:
+    """Return ``TimeOfDayPeriod`` entries parsed from ``parser``."""
+
+    if not parser.has_section("time_of_day"):
+        return DEFAULT_TIME_OF_DAY_PERIODS
+
+    periods = []
+    for label, value in parser.items("time_of_day"):
+        stripped_label = label.strip()
+        if not stripped_label:
+            raise BatchConfigurationError(
+                f"All time-of-day entries in '{config_path}' must have a label."
+            )
+
+        text = value.strip()
+        if "-" not in text:
+            raise BatchConfigurationError(
+                f"Time-of-day period '{stripped_label}' in '{config_path}' must be in "
+                "'start-end' format."
+            )
+
+        start_text, end_text = (part.strip() for part in text.split("-", 1))
+        try:
+            start_hour = int(start_text)
+            end_hour = int(end_text)
+        except ValueError as exc:
+            raise BatchConfigurationError(
+                f"Time-of-day hours for '{stripped_label}' in '{config_path}' must be integers."
+            ) from exc
+
+        if not 0 <= start_hour < 24:
+            raise BatchConfigurationError(
+                f"Start hour for '{stripped_label}' in '{config_path}' must be between 0 and 23."
+            )
+        if not 0 <= end_hour <= 24:
+            raise BatchConfigurationError(
+                f"End hour for '{stripped_label}' in '{config_path}' must be between 0 and 24."
+            )
+        if start_hour == end_hour:
+            raise BatchConfigurationError(
+                f"Start and end hours for '{stripped_label}' in '{config_path}' cannot match."
+            )
+
+        periods.append(
+            TimeOfDayPeriod(
+                label=stripped_label, start_hour=start_hour, end_hour=end_hour
+            )
+        )
+
+    if not periods:
+        raise BatchConfigurationError(
+            f"Section '[time_of_day]' in '{config_path}' must define at least one period."
+        )
+
+    return tuple(periods)
+
+
+def load_batch_config(directory: Path) -> BatchConfig:
+    """Return batch processing configuration loaded from ``directory``."""
+
+    config_path = directory / DEFAULT_BATCH_CONFIG_NAME
+    if not config_path.exists():
+        return BatchConfig()
+
+    parser = configparser.ConfigParser()
+    parser.optionxform = str
+    try:
+        with config_path.open("r", encoding="utf-8") as handle:
+            parser.read_file(handle)
+    except OSError as exc:
+        raise BatchConfigurationError(
+            f"Failed to read batch configuration '{config_path}': {exc.strerror or exc}"
+        ) from exc
+    except configparser.Error as exc:
+        raise BatchConfigurationError(
+            f"Batch configuration '{config_path}' contains invalid syntax: {exc}"
+        ) from exc
+
+    write_per_file_durations = True
+    if parser.has_option("batch", "write_per_file_durations"):
+        raw_value = parser.get("batch", "write_per_file_durations")
+        write_per_file_durations = _parse_bool(
+            raw_value, setting_name="write_per_file_durations", config_path=config_path
+        )
+
+    time_of_day_periods = _parse_time_of_day_section(parser, config_path=config_path)
+
+    return BatchConfig(
+        write_per_file_durations=write_per_file_durations,
+        time_of_day_periods=time_of_day_periods,
+    )
+
+
 class DurationStream(Iterable[str]):
     """Single-use iterable that streams normalized duration values from a CSV file."""
 
@@ -280,15 +435,16 @@ def _parse_iso8601(value: str) -> Optional[datetime]:
         return None
 
 
-def _time_of_day_label(timestamp: datetime) -> str:
+def _time_of_day_label(
+    timestamp: datetime, time_of_day_periods: Sequence[TimeOfDayPeriod]
+) -> str:
     """Return a human-readable time-of-day label for ``timestamp``."""
 
     hour = timestamp.astimezone(timezone.utc).hour
-    if 5 <= hour < 12:
-        return "Morning"
-    if 12 <= hour < 18:
-        return "Afternoon"
-    return "Evening"
+    for period in time_of_day_periods:
+        if period.contains(hour):
+            return period.label
+    return ""
 
 
 def _calculate_percentile(values: Sequence[float], percentile: float) -> float:
@@ -304,7 +460,12 @@ def _calculate_percentile(values: Sequence[float], percentile: float) -> float:
     return ordered[index]
 
 
-def summarize_csv(input_path: Path, *, encoding: str) -> BatchSummaryRow:
+def summarize_csv(
+    input_path: Path,
+    *,
+    encoding: str,
+    time_of_day_periods: Sequence[TimeOfDayPeriod] = DEFAULT_TIME_OF_DAY_PERIODS,
+) -> BatchSummaryRow:
     """Compute summary statistics for ``input_path``."""
 
     durations: List[float] = []
@@ -346,8 +507,9 @@ def summarize_csv(input_path: Path, *, encoding: str) -> BatchSummaryRow:
             date_key = timestamp.date().isoformat()
             date_counts[date_key] += 1
 
-            label = _time_of_day_label(timestamp)
-            time_of_day_counts[label] += 1
+            label = _time_of_day_label(timestamp, time_of_day_periods)
+            if label:
+                time_of_day_counts[label] += 1
 
     observations = len(durations)
     date_text = ""
@@ -372,10 +534,12 @@ def summarize_csv(input_path: Path, *, encoding: str) -> BatchSummaryRow:
             date_text = dominant_date
 
         if time_of_day_counts:
-            order = {"Morning": 0, "Afternoon": 1, "Evening": 2}
+            label_order = {
+                period.label: index for index, period in enumerate(time_of_day_periods)
+            }
             time_of_day = max(
                 time_of_day_counts.items(),
-                key=lambda item: (item[1], -order.get(item[0], 99)),
+                key=lambda item: (item[1], -label_order.get(item[0], len(label_order))),
             )[0]
 
     return BatchSummaryRow(
@@ -422,7 +586,11 @@ def _write_summary(
 
 
 def process_directory(
-    directory: Path, *, summary_output: Path, encoding: str
+    directory: Path,
+    *,
+    summary_output: Path,
+    encoding: str,
+    batch_config: Optional[BatchConfig] = None,
 ) -> Sequence[Dict[str, object]]:
     """Process every CSV file within ``directory`` and return summary information."""
 
@@ -432,10 +600,17 @@ def process_directory(
 
     records: List[Dict[str, object]] = []
 
+    config = batch_config or BatchConfig()
+
     for input_path in csv_files:
         output_path = input_path.with_name(f"durations_{input_path.name}")
-        process_csv(input_path, output_path, encoding)
-        summary = summarize_csv(input_path, encoding=encoding)
+        if config.write_per_file_durations:
+            process_csv(input_path, output_path, encoding)
+        summary = summarize_csv(
+            input_path,
+            encoding=encoding,
+            time_of_day_periods=config.time_of_day_periods,
+        )
         records.append(
             {
                 "filename": input_path.name,
@@ -458,10 +633,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 
         if args.batch_dir is not None:
+            batch_config = load_batch_config(args.batch_dir)
             summaries = process_directory(
                 args.batch_dir,
                 summary_output=args.summary_output,
                 encoding=args.encoding,
+                batch_config=batch_config,
             )
             print(
                 f"Successfully processed directory '{args.batch_dir}' "
